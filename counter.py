@@ -9,10 +9,47 @@
 import cv2
 import time
 import json
+import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, date
 from flask import Flask, jsonify, render_template_string
 from flask_cors import CORS
+
+# ─────────────────────────────────────────────
+# AI 불량 검출 DB 연동 (ai_defect.py와 공유)
+# ─────────────────────────────────────────────
+AI_DB_PATH = "data/defect_log.db"
+
+
+def get_ai_defect_stats():
+    """AI 불량 검출 DB에서 오늘 통계 조회 (파일 없으면 None 반환)"""
+    import os
+    if not os.path.exists(AI_DB_PATH):
+        return None
+    try:
+        today = date.today().strftime("%Y-%m-%d")
+        conn = sqlite3.connect(AI_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM defect_log WHERE date = ?", (today,))
+        total = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM defect_log WHERE date = ? AND result_type = '불량'", (today,))
+        defects = cur.fetchone()[0]
+        cur.execute(
+            "SELECT timestamp, confidence FROM defect_log WHERE date = ? AND result_type = '불량' ORDER BY id DESC LIMIT 5",
+            (today,)
+        )
+        recent = cur.fetchall()
+        conn.close()
+        defect_rate = round(defects / total * 100, 2) if total > 0 else 0.0
+        return {
+            "total": total,
+            "defects": defects,
+            "defect_rate": defect_rate,
+            "warning": defect_rate > 5.0,
+            "recent": [{"time": r[0], "conf": round(r[1] * 100, 1)} for r in recent],
+        }
+    except Exception:
+        return None
 
 # ─────────────────────────────────────────────
 # 설정값 (현장에서 조정)
@@ -254,6 +291,45 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="unit">&nbsp;</div>
   </div>
 </div>
+
+<!-- ── AI 불량 검출 현황 섹션 ── -->
+<div id="aiSection" style="padding: 0 30px 10px;">
+  <h2 style="color:#f59e0b; font-size:1.1rem; margin-bottom:14px; border-top:1px solid #334155; padding-top:20px;">
+    🤖 AI 불량 검출 현황 <span id="aiModeTag" style="font-size:0.75rem; background:#334155; padding:3px 10px; border-radius:12px; color:#94a3b8; margin-left:8px;">연결 확인 중...</span>
+  </h2>
+  <div id="aiAlertBanner" style="display:none; background:#7f1d1d; color:#fca5a5; padding:12px; border-radius:8px; text-align:center; font-weight:bold; margin-bottom:14px; animation: blink 1s step-start infinite;">
+    ⚠️ 불량률 5% 초과 — 즉시 확인하세요!
+  </div>
+  <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px;">
+    <div class="card">
+      <div class="label">오늘 검사수량</div>
+      <div class="value" id="aiTotal" style="color:#f59e0b;">-</div>
+      <div class="unit">개</div>
+    </div>
+    <div class="card warn">
+      <div class="label">불량 수량</div>
+      <div class="value" id="aiDefects">-</div>
+      <div class="unit">개</div>
+    </div>
+    <div class="card" id="aiRateCard">
+      <div class="label">불량률</div>
+      <div class="value" id="aiRate">-</div>
+      <div class="unit">%</div>
+    </div>
+    <div class="card" style="text-align:left; padding:16px 20px;">
+      <div class="label" style="margin-bottom:8px;">최근 불량 이력</div>
+      <div id="aiRecentList" style="font-size:0.82rem; color:#94a3b8; line-height:1.7;">-</div>
+    </div>
+  </div>
+  <p style="font-size:0.75rem; color:#475569; margin-top:10px; text-align:right;">
+    AI 검출 대시보드 상세보기: <a href="http://localhost:5001" target="_blank" style="color:#7dd3fc;">포트 5001 →</a>
+  </p>
+</div>
+
+<style>
+  @keyframes blink { 50% { opacity: 0.4; } }
+</style>
+
 <footer>헤이푸드서비스 | 자동 갱신 2초마다</footer>
 <script>
 function fmt(sec) {
@@ -293,6 +369,50 @@ async function update() {
   } catch(e) {}
 }
 setInterval(update, 2000); update();
+
+// ── AI 불량 현황 업데이트 ──
+async function updateAI() {
+  try {
+    const res = await fetch('/api/ai_defect');
+    const d = await res.json();
+
+    if (!d || d.available === false) {
+      document.getElementById('aiModeTag').textContent = '미연결 (ai_defect.py 미실행)';
+      document.getElementById('aiModeTag').style.background = '#1e293b';
+      return;
+    }
+
+    document.getElementById('aiModeTag').textContent = '● 연결됨';
+    document.getElementById('aiModeTag').style.background = '#064e3b';
+    document.getElementById('aiModeTag').style.color = '#6ee7b7';
+
+    document.getElementById('aiTotal').textContent = d.total.toLocaleString();
+    document.getElementById('aiDefects').textContent = d.defects.toLocaleString();
+    document.getElementById('aiRate').textContent = d.defect_rate.toFixed(1);
+
+    // 불량률 색상
+    const rateCard = document.getElementById('aiRateCard');
+    rateCard.querySelector('.value').style.color = d.warning ? '#f87171' : '#34d399';
+
+    // 경고 배너
+    const alertBanner = document.getElementById('aiAlertBanner');
+    alertBanner.style.display = d.warning ? 'block' : 'none';
+
+    // 최근 불량 이력
+    const recentList = document.getElementById('aiRecentList');
+    if (d.recent && d.recent.length > 0) {
+      recentList.innerHTML = d.recent.map(r => {
+        const t = new Date(r.time).toLocaleTimeString('ko-KR');
+        return `<span style="color:#f87171;">●</span> ${t} (${r.conf}%)`;
+      }).join('<br>');
+    } else {
+      recentList.textContent = '오늘 불량 없음';
+    }
+  } catch(e) {
+    document.getElementById('aiModeTag').textContent = '오류';
+  }
+}
+setInterval(updateAI, 3000); updateAI();
 </script>
 </body>
 </html>
@@ -326,6 +446,16 @@ def api_reset():
         state["recent_counts"] = []
         state["speed_per_min"] = 0
     return jsonify({"ok": True})
+
+
+@app.route("/api/ai_defect")
+def api_ai_defect():
+    """AI 불량 검출 통계 (ai_defect.py DB에서 읽어옴)"""
+    stats = get_ai_defect_stats()
+    if stats is None:
+        return jsonify({"available": False})
+    stats["available"] = True
+    return jsonify(stats)
 
 
 # ─────────────────────────────────────────────
