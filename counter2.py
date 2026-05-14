@@ -23,8 +23,23 @@ CONFIG = {
     "min_area": 500,            # 감지할 최소 면적 (노이즈 제거)
     "stop_threshold_sec": 10,   # N초간 카운트 없으면 "정지중" 판단
     "server_port": 5001,        # 웹 서버 포트 (counter.py는 5000, 이건 5001)
-    "machine_name": "자동충진실링기 1호기",
+    "machine_name": "자동충진 실링기",
+    # ─────────────────────────────────────────────
+    # 클라우드 PUSH 설정 (2026-05-14 추가)
+    # ─────────────────────────────────────────────
+    "machine_id": "filling",    # Firebase Realtime DB 노드 이름
+    "location": "2층",
+    "device_type": "counter",
+    "enable_cloud_push": True,
 }
+
+# 클라우드 PUSH 모듈 import (실패해도 카운팅은 진행)
+try:
+    from cloud_push import CloudPusher
+    _CLOUD_PUSH_AVAILABLE = True
+except Exception as _e:
+    _CLOUD_PUSH_AVAILABLE = False
+    print(f"[WARN] cloud_push.py 로드 실패: {_e} (로컬 전용 모드)")
 
 # ─────────────────────────────────────────────
 # 전역 상태 (스레드 공유)
@@ -302,10 +317,10 @@ setInterval(update, 2000); update();
 def dashboard():
     return DASHBOARD_HTML
 
-@app.route("/api/state")
-def api_state():
+def _build_state_dict():
+    """현재 state를 dict로 직렬화 (api_state + 클라우드 PUSH 공용)"""
     with state_lock:
-        return jsonify({
+        return {
             "count": state["count"],
             "status": state["status"],
             "start_time": state["start_time"],
@@ -313,7 +328,13 @@ def api_state():
             "stop_seconds": round(state["stop_seconds"]),
             "speed_per_min": state["speed_per_min"],
             "machine_name": CONFIG["machine_name"],
-        })
+        }
+
+
+@app.route("/api/state")
+def api_state():
+    return jsonify(_build_state_dict())
+
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
@@ -335,6 +356,29 @@ if __name__ == "__main__":
     # 카운팅 스레드 백그라운드 실행
     counter_thread = threading.Thread(target=run_counter, daemon=True)
     counter_thread.start()
+
+    # 클라우드 PUSH 시작 (Firebase Realtime DB)
+    cloud_pusher = None
+    if _CLOUD_PUSH_AVAILABLE and CONFIG.get("enable_cloud_push", True):
+        cloud_pusher = CloudPusher(
+            machine_id=CONFIG["machine_id"],
+            machine_name=CONFIG["machine_name"],
+            location=CONFIG["location"],
+            device_type=CONFIG["device_type"],
+        )
+        cloud_pusher.start()
+        
+        def state_sync_loop():
+            while True:
+                try:
+                    cloud_pusher.update(_build_state_dict())
+                except Exception as e:
+                    print(f"[WARN] state sync 실패: {e}")
+                time.sleep(1)
+        
+        sync_thread = threading.Thread(target=state_sync_loop, daemon=True)
+        sync_thread.start()
+        print(f"[INFO] 클라우드 PUSH 활성화 (machine_id={CONFIG['machine_id']})")
 
     # Flask 서버 실행 (모든 인터페이스에서 접근 가능)
     print(f"[INFO] 서버 시작 | http://0.0.0.0:{CONFIG['server_port']}")

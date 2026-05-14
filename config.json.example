@@ -1,0 +1,19 @@
+{
+  "_comment": "헤이푸드 통합 관제 시스템 - 라즈베리 설정 템플릿",
+  "_comment2": "이 파일을 config.json 으로 복사 후 각 라즈베리에 맞게 수정",
+  
+  "machine_id": "yooboo",
+  "machine_name": "유부초밥 성형기",
+  "location": "2층",
+  "device_type": "counter",
+  
+  "firebase_url": "https://heyfood-recipe-system-default-rtdb.asia-southeast1.firebasedatabase.app",
+  "push_interval_sec": 5,
+  
+  "_machine_id_options": [
+    "yooboo  → 유부초밥 성형기 (2층, counter.py)",
+    "filling → 자동충진 실링기 (2층, counter2.py)",
+    "temp    → 1층 온습도 모니터 (temperature.py)",
+    "metal   → 금속검출기 (준비 중, metal_detector.py)"
+  ]
+}

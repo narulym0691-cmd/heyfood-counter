@@ -31,7 +31,23 @@ CONFIG = {
     "fridge_temp_min": 0.0,     # 냉장고 최소 허용 온도 (°C)
     "freezer_temp_max": -10.0,  # 냉동고 최대 허용 온도 (°C)
     "freezer_temp_min": -25.0,  # 냉동고 최소 허용 온도 (°C)
+    # ─────────────────────────────────────────────
+    # 클라우드 PUSH 설정 (2026-05-14 추가)
+    # ─────────────────────────────────────────────
+    "machine_id": "temp",       # Firebase Realtime DB 노드 이름
+    "machine_name": "1층 온습도 모니터",
+    "location": "1층",
+    "device_type": "temperature",
+    "enable_cloud_push": True,
 }
+
+# 클라우드 PUSH 모듈 import (실패해도 측정은 진행)
+try:
+    from cloud_push import CloudPusher
+    _CLOUD_PUSH_AVAILABLE = True
+except Exception as _e:
+    _CLOUD_PUSH_AVAILABLE = False
+    print(f"[WARN] cloud_push.py 로드 실패: {_e} (로컬 전용 모드)")
 
 # ─────────────────────────────────────────────
 # 전역 상태
@@ -146,34 +162,46 @@ def run_temperature():
 app = Flask(__name__)
 CORS(app)
 
+def _build_state_dict():
+    """현재 state를 dict로 직렬화 (api_state + 클라우드 PUSH 공용)"""
+    with state_lock:
+        # 전체 alert 여부 (한 곳이라도 alert면 True)
+        any_alert = state["fridge"].get("alert") or state["freezer"].get("alert")
+        # 평균 상태
+        any_connected = state["fridge"].get("connected") or state["freezer"].get("connected")
+        return {
+            "fridge": dict(state["fridge"]),
+            "freezer": dict(state["freezer"]),
+            "start_time": state["start_time"],
+            # 통합 관제용 요약 필드
+            "alert": bool(any_alert),
+            "status": "alert" if any_alert else ("connected" if any_connected else "offline"),
+            "sensors": [
+                {
+                    "name": state["fridge"]["name"],
+                    "temp": state["fridge"]["temp"],
+                    "humidity": state["fridge"]["humidity"],
+                    "alert": state["fridge"]["alert"],
+                    "connected": state["fridge"]["connected"],
+                    "temp_max": state["fridge"]["temp_max"],
+                    "temp_min": state["fridge"]["temp_min"],
+                },
+                {
+                    "name": state["freezer"]["name"],
+                    "temp": state["freezer"]["temp"],
+                    "humidity": state["freezer"]["humidity"],
+                    "alert": state["freezer"]["alert"],
+                    "connected": state["freezer"]["connected"],
+                    "temp_max": state["freezer"]["temp_max"],
+                    "temp_min": state["freezer"]["temp_min"],
+                },
+            ],
+        }
+
+
 @app.route("/api/state")
 def api_state():
-    with state_lock:
-        return jsonify({
-            "fridge": {
-                "name": state["fridge"]["name"],
-                "temp": state["fridge"]["temp"],
-                "humidity": state["fridge"]["humidity"],
-                "status": state["fridge"]["status"],
-                "alert": state["fridge"]["alert"],
-                "last_read": state["fridge"]["last_read"],
-                "temp_max": state["fridge"]["temp_max"],
-                "temp_min": state["fridge"]["temp_min"],
-                "connected": state["fridge"]["connected"],
-            },
-            "freezer": {
-                "name": state["freezer"]["name"],
-                "temp": state["freezer"]["temp"],
-                "humidity": state["freezer"]["humidity"],
-                "status": state["freezer"]["status"],
-                "alert": state["freezer"]["alert"],
-                "last_read": state["freezer"]["last_read"],
-                "temp_max": state["freezer"]["temp_max"],
-                "temp_min": state["freezer"]["temp_min"],
-                "connected": state["freezer"]["connected"],
-            },
-            "start_time": state["start_time"],
-        })
+    return jsonify(_build_state_dict())
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
@@ -217,6 +245,30 @@ if __name__ == "__main__":
     # 온도 읽기 스레드
     temp_thread = threading.Thread(target=run_temperature, daemon=True)
     temp_thread.start()
+
+    # 클라우드 PUSH 시작 (Firebase Realtime DB)
+    cloud_pusher = None
+    if _CLOUD_PUSH_AVAILABLE and CONFIG.get("enable_cloud_push", True):
+        cloud_pusher = CloudPusher(
+            machine_id=CONFIG["machine_id"],
+            machine_name=CONFIG["machine_name"],
+            location=CONFIG["location"],
+            device_type=CONFIG["device_type"],
+        )
+        cloud_pusher.start()
+        
+        def state_sync_loop():
+            import time as _time
+            while True:
+                try:
+                    cloud_pusher.update(_build_state_dict())
+                except Exception as e:
+                    print(f"[WARN] state sync 실패: {e}")
+                _time.sleep(1)
+        
+        sync_thread = threading.Thread(target=state_sync_loop, daemon=True)
+        sync_thread.start()
+        print(f"[INFO] 클라우드 PUSH 활성화 (machine_id={CONFIG['machine_id']})")
 
     print(f"[INFO] 온도 모니터링 서버 시작 | 포트: {CONFIG['server_port']}")
     print(f"[INFO] 냉장고 → GPIO {CONFIG['sensor1_pin']}번")

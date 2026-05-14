@@ -1,111 +1,131 @@
-# 🍱 헤이푸드 유부초밥 성형기 생산 카운팅 시스템
+# 헤이푸드 통합 관제 시스템 — 라즈베리파이 + 클라우드
 
-라즈베리파이 + 카메라로 유부초밥 생산수량과 생산시간을 자동 집계하여 3층 사무실 모니터에 실시간 표시합니다.
+라즈베리파이의 카메라 / 센서로 공장 데이터를 수집하고, **Firebase Realtime DB로 실시간 전송**하여 어디서든 모니터링 가능한 시스템입니다.
 
----
-
-## 시스템 구조
+## 🏭 운영 구조 (2026-05-14 클라우드 전환)
 
 ```
-[2층] 유부초밥 성형기
-    → 카메라
-    → 라즈베리파이 (counter.py 실행)
-        → Wi-Fi
-            → [3층] 웹 대시보드 (브라우저로 접속)
+[1층] 라즈베리 #1
+ └─ DHT22 센서 (냉장고/냉동고)
+    └─ temperature.py → Firebase /factory/temp
+
+[2층] 라즈베리 #2
+ ├─ 카메라 0 → counter.py  → Firebase /factory/yooboo  (유부초밥 성형기)
+ └─ 카메라 1 → counter2.py → Firebase /factory/filling (자동충진 실링기)
+
+[3층 모니터 / 어디든] 
+ └─ 통합 관제 대시보드 (HTML)
+    └─ Firebase Realtime DB 실시간 구독 → 자동 갱신
 ```
 
----
+## ✨ 측정 항목
 
-## 대시보드 화면
+| 장비 | 파일 | 포트 | machine_id | 측정 |
+|------|------|------|-----------|------|
+| 유부초밥 성형기 | `counter.py` | 5000 | `yooboo` | 생산수량 / 분당속도 / 가동시간 |
+| 자동충진 실링기 | `counter2.py` | 5001 | `filling` | 생산수량 / 분당속도 / 가동시간 |
+| 금속검출기 | `metal_detector.py` | 5002 | `metal` | 검출 알람 (준비 중) |
+| 1층 온습도 | `temperature.py` | 5003 | `temp` | 냉장고/냉동고 온도/습도 |
 
-| 항목 | 설명 |
-|------|------|
-| 오늘 생산수량 | 기준선 통과 횟수 자동 집계 |
-| 분당 생산속도 | 최근 1분 내 카운트 수 |
-| 누적 가동시간 | 가동중 상태 누적 시간 |
-| 누적 정지시간 | 정지중 상태 누적 시간 |
-| 작업 시작 시각 | 프로그램 시작 시각 |
-| 가동/정지 상태 | 실시간 상태 표시 |
+## 🚀 라즈베리파이 설치 (한 번만)
 
----
-
-## 설치 방법 (라즈베리파이)
-
-### 1단계: 코드 받기
 ```bash
 git clone https://github.com/narulym0691-cmd/heyfood-counter
 cd heyfood-counter
+
+bash install.sh    # OpenCV + Flask 설치
 ```
 
-### 2단계: 설치
+## 🔧 라즈베리파이별 자동 실행 등록
+
+### 1층 라즈베리 (온습도)
 ```bash
-bash install.sh
+cd heyfood-counter
+bash autostart.sh temp
 ```
 
-### 3단계: 실행
+### 2층 라즈베리 (유부초밥 + 실링 동시)
 ```bash
-python3 counter.py
+cd heyfood-counter
+bash autostart.sh all-2f
 ```
 
-### 4단계: 대시보드 접속 (3층 사무실 PC)
+## 🔄 업데이트 (코드 수정 시)
+
+각 라즈베리에서:
+```bash
+cd heyfood-counter
+git pull
+
+# 서비스 재시작
+sudo systemctl restart heyfood-yooboo    # 2층, 유부초밥
+sudo systemctl restart heyfood-filling   # 2층, 실링
+sudo systemctl restart heyfood-temp      # 1층, 온도
 ```
-http://라즈베리파이IP주소:5000
-```
-예: `http://192.168.1.100:5000`
 
----
+## 📡 클라우드 연동 (자동)
 
-## 설정값 조정 (counter.py 상단 CONFIG)
+각 .py 파일은 **자동으로 Firebase Realtime DB에 5초마다 PUSH** 합니다.
 
-```python
-CONFIG = {
-    "camera_index": 0,          # 카메라 번호 (USB카메라면 1로 변경)
-    "line_position": 0.5,       # 기준선 위치 (0.3 ~ 0.7 조정)
-    "min_area": 500,            # 감지 최소 면적 (노이즈 많으면 늘림)
-    "stop_threshold_sec": 10,   # N초 후 정지 판단
-    "server_port": 5000,        # 웹 포트
-    "machine_name": "유부초밥 성형기 1호기",
+- 인터넷 끊겨도 카운팅은 계속 (로컬 큐 버퍼링)
+- 인터넷 복귀 시 자동 재시도
+- `enable_cloud_push: False`로 설정하면 클라우드 전송 OFF (로컬만)
+
+### Firebase 데이터 구조
+```json
+{
+  "factory": {
+    "yooboo":  { "count": 1247, "speed_per_min": 32, "status": "가동중", ... },
+    "filling": { "count": 1200, "speed_per_min": 30, "status": "가동중", ... },
+    "temp":    { "sensors": [...], "alert": false, ... },
+    "metal":   { "status": "preparing" }
+  }
 }
 ```
 
----
+## 🌐 통합 관제 대시보드
 
-## 부팅 시 자동 실행 설정
+- **URL:** `https://obawimzb.gensparkclaw.com/factory` (작업 중)
+- **로컬 API (옵션):** 각 라즈베리 IP의 `/api/state` 도 작동 (기존 호환)
 
+## 🔧 설정 변경
+
+`config.json` 파일을 만들어서 설정 오버라이드 가능 (선택 사항):
 ```bash
-bash autostart.sh
+cp config.json.example config.json
+nano config.json
 ```
 
----
+또는 각 .py 파일 상단의 `CONFIG = {...}` 직접 수정.
 
-## API
-
-| 엔드포인트 | 설명 |
-|-----------|------|
-| `GET /` | 대시보드 웹 화면 |
-| `GET /api/state` | 현재 상태 JSON |
-| `POST /api/reset` | 카운트 초기화 (하루 시작 시) |
-
----
-
-## 문제 해결
+## 🐛 문제 해결
 
 | 증상 | 해결 |
 |------|------|
-| 카메라 안 열림 | `camera_index` 0→1 변경 |
+| 카메라 안 열림 | `camera_index` 값 0↔1 변경 |
 | 카운트 너무 많음 | `min_area` 값 늘리기 |
 | 카운트 안 됨 | `line_position` 값 조정, 조명 확인 |
-| 3층에서 안 열림 | 라즈베리파이 IP 확인, 같은 Wi-Fi인지 확인 |
+| 클라우드 PUSH 실패 | `journalctl -u heyfood-yooboo -f` 로그 확인 |
+| Firebase 401 오류 | 영민님께 보안 규칙 확인 부탁 |
 
----
+## 📊 모니터링
 
-## 개발 현황
+각 서비스 상태:
+```bash
+sudo systemctl status heyfood-yooboo
+sudo systemctl status heyfood-filling
+sudo systemctl status heyfood-temp
 
-- [x] 영상 기준선 통과 카운팅
-- [x] 가동/정지 상태 자동 판단
-- [x] 누적 가동/정지 시간 계산
-- [x] 실시간 웹 대시보드
-- [x] 부팅 자동 실행
-- [ ] 일별 생산 이력 저장 (2차)
-- [ ] 불량 수량 집계 (2차)
-- [ ] ERP 연동 (2차)
+# 실시간 로그
+sudo journalctl -u heyfood-yooboo -f
+```
+
+## 📜 변경 이력
+
+- **2026-05-14**: 클라우드 전환 (Firebase Realtime DB)
+  - `cloud_push.py` 추가 → 5초마다 자동 PUSH
+  - 4개 .py 파일에 CloudPusher 통합
+  - autostart.sh를 장비별 systemd 서비스 등록 방식으로 개편
+  - 인터넷 끊겨도 로컬 카운팅 유지
+- **2026-05-13**: counter2.py, temperature.py, metal_detector.py 추가 (영민님)
+- **2026-05-(이전)**: counter.py 초기 버전 (영민님)

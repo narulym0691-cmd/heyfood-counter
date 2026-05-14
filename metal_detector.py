@@ -29,7 +29,22 @@ CONFIG = {
     "stopbits": 1,
     "timeout": 1,
     "server_port": 5002,        # Flask API 포트
+    # ─────────────────────────────────────────────
+    # 클라우드 PUSH 설정 (2026-05-14 추가, 현재 준비 중)
+    # ─────────────────────────────────────────────
+    "machine_id": "metal",
+    "machine_name": "금속검출기",
+    "location": "-",
+    "device_type": "metal",
+    "enable_cloud_push": False,  # 운영 시작하면 True로 변경
 }
+
+# 클라우드 PUSH 모듈 import
+try:
+    from cloud_push import CloudPusher
+    _CLOUD_PUSH_AVAILABLE = True
+except Exception as _e:
+    _CLOUD_PUSH_AVAILABLE = False
 
 # ─────────────────────────────────────────────
 # 전역 상태
